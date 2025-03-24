@@ -6,7 +6,7 @@
  */
 
 //Dependencies
-//require('./kafka')()
+require('./kafka')()
 require('./cache')()
 require('./aes256cbc')()
 require('./bull')()
