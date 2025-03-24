@@ -109,12 +109,15 @@ const createUser = async (username, password, firstname, lastname, email, auth =
 		})
 
 		const payload = buildCreateUserPayload(username, password, firstname, lastname, email, auth, lang)
+		console.log('Payload:::', payload)
 		const payloadParams = new URLSearchParams(payload)
 
 		const response = await moodleAxios.post(
 			`/webservice/rest/server.php?${params.toString()}`,
 			payloadParams.toString()
 		)
+
+		console.log('Response::::', response.data)
 
 		return {
 			user_id: response.data[0].id,
