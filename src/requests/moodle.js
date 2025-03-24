@@ -158,9 +158,9 @@ const login = async (username, password, options = {}) => {
 
 		// Step 1: Get the login page to fetch token
 		const loginPage = await client.get(LOGIN_URL)
-		console('-----------')
-		console(loginPage.data)
-		console('-----------')
+		console.log('-----------')
+		console.log(loginPage.data)
+		console.log('-----------')
 		const loginTokenMatch = loginPage.data.match(/logintoken" value="(.+?)"/i)
 		const loginToken = loginTokenMatch ? loginTokenMatch[1] : null
 
