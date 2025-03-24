@@ -27,6 +27,7 @@
 		"@shelf/jest-mongodb": "^3.0.1",
 		"aws-sdk": "^2.1025.0",
 		"axios": "^1.5.1",
+		"axios-cookiejar-support": "^5.0.5",
 		"bcrypt": "^5.0.1",
 		"bcryptjs": "^2.4.3",
 		"body-parser": "^1.19.0",
@@ -34,6 +35,7 @@
 		"cli-table": "^0.3.11",
 		"client-cloud-services": "^3.0.7",
 		"commander": "^9.4.0",
+		"cookie-parser": "^1.4.7",
 		"cors": "^2.8.5",
 		"crypto": "^1.0.1",
 		"csvtojson": "^2.0.10",
@@ -74,6 +76,7 @@
 		"sequelize-cli": "^6.6.0",
 		"stream": "^0.0.2",
 		"swagger-ui-express": "^4.4.0",
+		"tough-cookie": "^5.1.2",
 		"url": "^0.11.3",
 		"uuid": "^8.3.2"
 	},
