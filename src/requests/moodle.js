@@ -161,7 +161,8 @@ const login = async (username, password, options = {}) => {
 		console.log('-----------')
 		console.log(loginPage.data)
 		console.log('-----------')
-		const loginTokenMatch = loginPage.data.match(/logintoken" value="(.+?)"/i)
+		const loginTokenMatch = loginPage.data.match(/logintoken"\s+value="([^"]+)"/i)
+		console.log('loginTokenMatch::::', loginTokenMatch)
 		const loginToken = loginTokenMatch ? loginTokenMatch[1] : null
 
 		if (!loginToken) {
