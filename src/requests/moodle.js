@@ -3,6 +3,7 @@ const crypto = require('crypto')
 const axios = require('axios')
 const tough = require('tough-cookie')
 const { wrapper } = require('axios-cookiejar-support')
+const cheerio = require('cheerio')
 
 // Environment variables for configuration
 const MOODLE_URL = process.env.MOODLE_URL || 'http://localhost:8080'
