@@ -162,8 +162,8 @@ const login = async (username, password, options = {}) => {
 		console.log(loginPage.data)
 		console.log('-----------')
 		const loginTokenMatch = loginPage.data.match(/logintoken"\s+value="([^"]+)"/i)
-		console.log('loginTokenMatch::::', loginTokenMatch)
 		const loginToken = loginTokenMatch ? loginTokenMatch[1] : null
+		console.log('loginTokenMatch::::', loginTokenMatch)
 
 		if (!loginToken) {
 			console.error('Could not fetch Moodle login token')
