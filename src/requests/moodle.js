@@ -158,12 +158,10 @@ const login = async (username, password, options = {}) => {
 
 		// Step 1: Get the login page to fetch token
 		const loginPage = await client.get(LOGIN_URL)
-		console.log('-----------')
-		console.log(loginPage.data)
-		console.log('-----------')
-		const loginTokenMatch = loginPage.data.match(/logintoken"\s+value="([^"]+)"/i)
-		const loginToken = loginTokenMatch ? loginTokenMatch[1] : null
-		console.log('loginTokenMatch::::', loginTokenMatch)
+		const $ = cheerio.load(loginPage.data) // Load response into Cheerio
+		const loginToken = $('input[name="logintoken"]').attr('value')
+
+		console.log('loginToken:', loginToken)
 
 		if (!loginToken) {
 			console.error('Could not fetch Moodle login token')
@@ -193,7 +191,7 @@ const login = async (username, password, options = {}) => {
 		}
 
 		// Step 4: Extract the session cookie
-		const cookies = await cookieJar.getCookies(MOODLE_URL)
+		const cookies = await cookieJar.getCookies(LOGIN_URL)
 		const sessionCookie = cookies.find((c) => c.key === 'MoodleSession')
 
 		if (!sessionCookie) {
