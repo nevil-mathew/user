@@ -149,7 +149,7 @@ const createHashedUser = async (username, password, firstname, lastname, email, 
  */
 const login = async (username, password, options = {}) => {
 	const LOGIN_URL = `https://learn.tunerlabs.com/learn/login/index.php`
-	const DASHBOARD_URL = `${MOODLE_URL}/my/`
+	const DASHBOARD_URL = `https://learn.tunerlabs.com/my/`
 
 	try {
 		// Create a cookie jar to persist session cookies
