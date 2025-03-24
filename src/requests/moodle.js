@@ -148,7 +148,7 @@ const createHashedUser = async (username, password, firstname, lastname, email, 
  * Login to Moodle and get session cookie
  */
 const login = async (username, password, options = {}) => {
-	const LOGIN_URL = `${MOODLE_URL}/login/index.php`
+	const LOGIN_URL = `https://learn.tunerlabs.com/learn/login/index.php`
 	const DASHBOARD_URL = `${MOODLE_URL}/my/`
 
 	try {
