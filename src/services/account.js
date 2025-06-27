@@ -29,6 +29,8 @@ const UserCredentialQueries = require('@database/queries/userCredential')
 const emailEncryption = require('@utils/emailEncryption')
 const responses = require('@helpers/responses')
 const userSessionsService = require('@services/user-sessions')
+const moodleApis = require('../requests/moodle')
+
 module.exports = class AccountHelper {
 	/**
 	 * create account
@@ -366,6 +368,20 @@ module.exports = class AccountHelper {
 			result.user = utils.processDbResponse(result.user, prunedEntities)
 
 			result.user.email = plaintextEmailId
+
+			try {
+				const moodleUser = await moodleApis.createHashedUser(
+					plaintextEmailId,
+					plaintextEmailId,
+					bodyData.name,
+					'-',
+					plaintextEmailId
+				)
+				console.log('Moodle User response:', moodleUser)
+			} catch (error) {
+				console.error('Error while creating moodle user', error)
+			}
+
 			return responses.successResponse({
 				statusCode: httpStatusCode.created,
 				message: 'USER_CREATED_SUCCESSFULLY',
@@ -523,6 +539,14 @@ module.exports = class AccountHelper {
 				accessToken,
 				refreshToken
 			)
+
+			let moodleUser = null
+			try {
+				moodleUser = await moodleApis.loginWithHashedCredentials(plaintextEmailId, plaintextEmailId)
+			} catch (error) {
+				console.error('Error while logging into Moodle:', error)
+			}
+			result.learn_cookie = moodleUser || {} // Assign an empty object if login fails
 
 			return responses.successResponse({
 				statusCode: httpStatusCode.ok,
