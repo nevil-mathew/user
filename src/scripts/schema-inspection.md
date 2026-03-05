@@ -23,6 +23,7 @@
 12. [Role ID Scoping: Tenant-Scoped vs Global](#12-role-id-scoping-tenant-scoped-vs-global)
 13. [Citus Distribution Summary](#13-citus-distribution-summary)
 14. [Migration Notes for User Tenant Migration](#14-migration-notes-for-user-tenant-migration)
+15. [Role Mapping Strategy for Cross-Tenant User Migration](#15-role-mapping-strategy-for-cross-tenant-user-migration)
 
 ---
 
@@ -634,3 +635,233 @@ Based on the schema findings above, a cross-tenant user migration script must ha
 ### Isolation Level Recommendation
 
 Use `SERIALIZABLE` isolation to prevent concurrent writes from interleaving during the multi-table update sequence.
+
+---
+
+## 15. Role Mapping Strategy for Cross-Tenant User Migration
+
+### Overview
+
+Based on the schema findings in §12 (Role ID Scoping: Tenant-Scoped vs Global), roles in the `user_roles` table are **tenant-scoped and organization-scoped**. A `role_id` integer from one tenant carries no guaranteed meaning in another tenant. This section defines the safest, production-validated strategy for mapping role IDs during cross-tenant user migration, specifies abort conditions for ambiguous mappings, and documents the complete role_id mapping logic.
+
+---
+
+### 15.1 Direct Role ID Copy: When It Is and Is Not Permissible
+
+**Direct ID copy** means inserting rows into `user_organization_roles` in the target tenant using the same `role_id` integers from the source tenant, without any remapping.
+
+#### Why Direct ID Copy Is Unsafe by Default
+
+| Reason | Detail |
+|--------|--------|
+| IDs are auto-increment per Citus shard | Citus auto-increment is independent per `tenant_code` shard; the same integer value may represent completely different roles in different tenants |
+| DB FK will reject invalid IDs | `fk_user_organization_roles_role_composite` references `user_roles(id, tenant_code)` — if `(role_id, newTenantCode)` does not exist in `user_roles`, the `INSERT` will fail with a FK violation and roll back the transaction |
+| Silent data corruption | If `(role_id, newTenantCode)` happens to exist but maps to a different `title` than in the source tenant, users will silently receive wrong roles with no DB-level error |
+| Unique constraint `unique_title_org_id_tenant_code` | Even if the ID exists in target, the role title may differ — the constraint does not protect against cross-tenant ID reuse |
+
+#### Conditions Under Which Direct ID Copy Is Technically Permissible
+
+Direct copy **may only be considered** when **all** of the following conditions are simultaneously and explicitly verified before the migration runs:
+
+1. **No users exist yet in the target tenant** for the organizations being migrated (eliminates PK collision risk on the 4-column composite PK of `user_organization_roles`).
+2. **Explicit pre-migration verification** confirms that for every `(role_id, currentTenantCode)` pair being migrated, a row exists in `user_roles` with `id = role_id` AND `tenant_code = newTenantCode` AND the `title` column is **identical** in both tenants.
+3. **The target tenant's `user_roles` table was seeded from the same migration sequence** as the source tenant, with no tenant-specific role additions, renames, or soft-deletes that would cause ID assignment to diverge.
+4. **No roles have been soft-deleted** (`deleted_at IS NULL`) in either tenant's `user_roles` since seeding, as soft-deleted rows consume their `id` from the auto-increment sequence and can cause subsequent inserts to produce different IDs per tenant.
+
+> ⚠️ **Production Recommendation:** Even when all four conditions are met, use title-based mapping (§15.2). Direct ID copy is fragile — it will break silently under future migrations or role customizations. It is documented here only to fully define the boundary between safe and unsafe operations.
+
+---
+
+### 15.2 Title-Based Mapping Strategy (Recommended for All Cross-Tenant Migrations)
+
+**Use `user_roles.title` as the stable cross-tenant identifier.** The `title` field (e.g., `'admin'`, `'mentor'`, `'mentee'`, `'session_manager'`, `'public'`, `'tenant_admin'`) is the semantic identifier for a role and is consistent across tenants via the migration seed process.
+
+#### Why `title` Is a Stable Attribute
+
+- All system roles are seeded by migrations using fixed `title` string constants (independent of the auto-increment `id` value).
+- The partial unique constraint `unique_title_org_id_tenant_code` on `(title, organization_id, tenant_code) WHERE deleted_at IS NULL` guarantees that within any `(organization, tenant)` pair, a title appears at most once among active (non-deleted) rows.
+- `title` is set programmatically by migration code — not by end users — making it schema-controlled and reliable across deployment environments.
+
+#### Organization Context for Mapping
+
+Because `title` uniqueness is scoped to `(organization_id, tenant_code)`, mapping must be **organization-aware**. The effective mapping key is the composite `(title, organization_code)` pair — not `title` alone — to avoid ambiguity when the same title exists in different organizations within the same tenant.
+
+> **Example:** If both the default organization (org A) and a custom organization (org B) define a role titled `'mentor'` within the same tenant, a title-only lookup would return two rows and produce an ambiguous mapping. The `organization_code` discriminator eliminates this ambiguity.
+
+#### System Roles vs. Custom Roles
+
+| Role Category | `user_type` | `title` examples | Cross-Tenant Portability |
+|---------------|-------------|------------------|--------------------------|
+| System roles  | `1`         | `admin`, `mentor`, `mentee`, `session_manager`, `public`, `tenant_admin` | Expected to exist in every tenant; absence is a configuration error |
+| Custom roles  | `0`         | Tenant/org-specific strings | May legitimately not exist in target tenant |
+
+---
+
+### 15.3 Role ID Mapping Algorithm
+
+**Input:** A set of `userIds` being migrated from `currentTenantCode` to `newTenantCode`.
+
+**Step 1 — Collect source role references with organization context:**
+
+```sql
+SELECT DISTINCT
+    uor.role_id           AS source_role_id,
+    ur.title              AS role_title,
+    ur.user_type          AS role_user_type,
+    o.code                AS organization_code
+  FROM user_organization_roles uor
+  JOIN user_roles ur
+    ON ur.id           = uor.role_id
+   AND ur.tenant_code  = uor.tenant_code
+  JOIN organizations o
+    ON o.id            = ur.organization_id
+   AND o.tenant_code   = ur.tenant_code
+ WHERE uor.user_id     IN (:userIds)
+   AND uor.tenant_code  = :currentTenantCode
+   AND uor.deleted_at  IS NULL
+   AND ur.deleted_at   IS NULL;
+```
+
+This produces a set of `(source_role_id, role_title, role_user_type, organization_code)` tuples for the source tenant.
+
+**Step 2 — Verify organizations exist in target tenant:**
+
+```sql
+SELECT code
+  FROM organizations
+ WHERE code        IN (:organizationCodes)
+   AND tenant_code  = :newTenantCode
+   AND deleted_at  IS NULL;
+```
+
+Any `organization_code` not found here triggers **Abort Condition A3**.
+
+**Step 3 — Look up matching roles in target tenant by `(title, organization_code)`:**
+
+```sql
+SELECT
+    ur.id   AS target_role_id,
+    ur.title,
+    ur.user_type,
+    ur.status,
+    o.code  AS organization_code
+  FROM user_roles ur
+  JOIN organizations o
+    ON o.id           = ur.organization_id
+   AND o.tenant_code  = ur.tenant_code
+ WHERE ur.tenant_code  = :newTenantCode
+   AND ur.title       IN (:titles)
+   AND ur.deleted_at  IS NULL;
+```
+
+**Step 4 — Build the mapping table:**
+
+For each source tuple `(source_role_id, title, org_code)`, find the target row where both `title` AND `organization_code` match. The result is:
+
+```
+{ source_role_id → target_role_id }
+```
+
+Before finalizing the mapping, apply the abort condition checks in §15.4.
+
+**Step 5 — Apply during INSERT into `user_organization_roles`:**
+
+Use a `CASE` expression to swap `role_id` values during the `INSERT` statement:
+
+```sql
+INSERT INTO user_organization_roles
+    (tenant_code, user_id, organization_code, role_id, created_at, updated_at, deleted_at)
+SELECT
+    :newTenantCode,
+    user_id,
+    organization_code,
+    CASE role_id
+        WHEN <source_id_1> THEN <target_id_1>
+        WHEN <source_id_2> THEN <target_id_2>
+        ...
+        ELSE NULL
+    END,
+    created_at,
+    updated_at,
+    deleted_at
+  FROM user_organization_roles
+ WHERE user_id     IN (:userIds)
+   AND tenant_code  = :currentTenantCode
+   AND (CASE role_id
+            WHEN <source_id_1> THEN <target_id_1>
+            ...
+            ELSE NULL
+        END) IS NOT NULL;
+```
+
+Rows where `CASE ... END IS NULL` are explicitly excluded from the `INSERT` (unmapped custom roles). Unmapped rows must be logged with user ID, source role ID, and title before the transaction commits.
+
+---
+
+### 15.4 Abort Conditions for Ambiguous or Incomplete Role Mappings
+
+The migration script **MUST abort** (rollback the SERIALIZABLE transaction and exit with code 1) under the following conditions. These are non-negotiable safety gates:
+
+| ID | Abort Condition | Technical Reason | Error Message Pattern |
+|----|-----------------|------------------|-----------------------|
+| **A1** | A **system role** (`user_type = 1`) in the source tenant has no matching `(title, organization_code)` pair in the target tenant's active `user_roles` | System roles are expected to exist in all tenants; their absence indicates a target-tenant setup failure that must be fixed before migration | `"ABORT [A1]: System role '{title}' (id={id}) in org '{org_code}' has no match in target tenant '{newTenantCode}'"` |
+| **A2** | A `(title, organization_code)` pair from the source tenant matches **two or more** non-deleted rows in the target tenant's `user_roles` (e.g., via org_id vs org_code lookup ambiguity) | Cannot deterministically choose which target `role_id` to use — mapping is ambiguous and any choice risks assigning wrong permissions | `"ABORT [A2]: Role title '{title}' in org '{org_code}' maps to multiple role IDs in target tenant: [{ids}]"` |
+| **A3** | The source role's owning organization (by `organization_code`) does **not exist** in the target tenant's `organizations` table | The FK `fk_user_org_roles_user_organizations` requires `(user_id, organization_code, tenant_code)` to exist in `user_organizations` first; a missing org means the user cannot be placed in that org either | `"ABORT [A3]: Organization '{org_code}' does not exist in target tenant '{newTenantCode}'"` |
+| **A4** | After role mapping, a `(user_id, organization_code, role_id, tenant_code)` tuple to be inserted already exists in the target's `user_organization_roles` (among non-deleted rows) | Violates the 4-column composite PK `user_organization_roles_pkey` — the INSERT will fail at the DB level | `"ABORT [A4]: PK collision in user_organization_roles for user_id={id}, role_id={target_id}, org='{org_code}' in tenant '{newTenantCode}'"` |
+| **A5** | The matched role in the target tenant has `status = 'INACTIVE'` | Assigning users to inactive roles will silently deny access — the application treats `ACTIVE` status as a precondition for role-based authorization | `"ABORT [A5]: Matched target role '{title}' (id={id}) in org '{org_code}' has status='INACTIVE'"` |
+
+**Warning conditions (log but do not abort by default):**
+
+| ID | Warning Condition | Recommended Action |
+|----|-------------------|--------------------|
+| **W1** | A **custom role** (`user_type = 0`) in the source tenant has no matching `(title, organization_code)` in the target tenant | Log the unmapped role ID, title, and count of affected users; skip those specific role assignments in the INSERT; continue migration |
+| **W2** | A source role's `organization_code` does not exist in the target tenant, but a role with the same `title` exists under a **different** org in the target | Log the conflict explicitly; do **NOT** auto-remap to a different organization — this masks an org-migration dependency issue; treat as **A3** if the org FK would be violated |
+
+> **Strict mode:** Operators may pass `--strict` flag to promote all **W1** warnings into abort conditions **(A1-equivalent)**. In strict mode, **every** role assignment — system or custom — must have a verified target mapping, or the migration is aborted entirely.
+
+---
+
+### 15.5 Full Mapping Decision Tree
+
+```
+For each (role_id, currentTenantCode) referenced in user_organization_roles:
+│
+├─► Lookup (title, user_type, organization_id) in source user_roles
+│     └─ NOT FOUND (role soft-deleted or missing) → SKIP row (log warning)
+│
+├─► Resolve source organization_code via JOIN with organizations
+│     └─ NOT FOUND → ABORT [A3]
+│
+├─► Verify organization_code exists in target tenant organizations
+│     └─ NOT FOUND → ABORT [A3]
+│
+├─► Lookup roles in target tenant by (title, organization_code)
+│     ├─ 0 matches AND user_type = 1 (system role)  → ABORT [A1]
+│     ├─ 0 matches AND user_type = 0 (custom role)  → WARN [W1] / SKIP
+│     │                                                (ABORT [A1] in --strict mode)
+│     ├─ 1 match  AND status = 'ACTIVE'             → MAP source_role_id → target_role_id ✓
+│     ├─ 1 match  AND status = 'INACTIVE'           → ABORT [A5]
+│     └─ 2+ matches (same title, same org_code)     → ABORT [A2]
+│
+├─► Check for PK collision in target user_organization_roles
+│     └─ COLLISION FOUND → ABORT [A4]
+│
+└─► Apply mapping in CASE expression during INSERT ✓
+```
+
+---
+
+### 15.6 Summary: Direct ID Copy vs. Title-Based Mapping
+
+| Criterion | Direct ID Copy | Title-Based Mapping |
+|-----------|----------------|---------------------|
+| Safe by default | ❌ No | ✅ Yes |
+| Handles divergent auto-increment sequences | ❌ Fails silently | ✅ Works correctly |
+| DB FK `fk_user_organization_roles_role_composite` safe | ❌ Risk of FK violation | ✅ FK verified before insert |
+| Org-aware disambiguation | ❌ Not applicable | ✅ Uses `(title, organization_code)` composite key |
+| Works with freshly-seeded target tenant | ✅ May work (with exhaustive verification) | ✅ Always works |
+| Works with customized target tenant | ❌ Breaks silently | ✅ Detects and aborts on mismatches |
+| Abort on ambiguity | ❌ No detection | ✅ Abort conditions A1–A5 enforced |
+| Recommended for production | ❌ Explicitly prohibited | ✅ Mandatory |
+
+> **Final decision:** All cross-tenant user migrations **MUST** use title-based role mapping as documented in §15.3. Direct ID copy is **explicitly prohibited** in production migration scripts unless all four conditions in §15.1 are simultaneously verified and documented in the migration audit log. The title-based approach with organization-code scoping and abort conditions A1–A5 is the only production-safe strategy given the tenant-scoped, organization-owned nature of `user_roles`.
